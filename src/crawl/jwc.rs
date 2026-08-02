@@ -53,20 +53,52 @@ pub fn get_jwc(crawler_config: CrawlerConfig) -> Result<Crawler, Box<dyn Error>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn test_fetch_summary() {
-        let crawler_config = CrawlerConfig {
-            keep_complex_tables: true
-        };
+    fn jwc_uses_seven_fixed_categories() {
+        let crawler_config = CrawlerConfig::bounded(true, 2, 20, 40, 1_000, 4_194_304).unwrap();
         let jwc = get_jwc(crawler_config).unwrap();
-        let s = Crawler::fetch_content(
-            &jwc.client,
-            "https://jwc.seu.edu.cn/2026/0126/c21676a553741/page.htm",
-            &[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip", ".rar"].map(|s| s.to_string()),
-            &"div.Article_Content".to_string(),
-            true
-        )
-        .unwrap();
-        println!("{s:?}");
+
+        assert_eq!(jwc.site_config.categories.len(), 7);
+        assert_eq!(jwc.site_config.base_url, "https://jwc.seu.edu.cn");
+    }
+
+    #[test]
+    fn detail_fixture_preserves_table_and_controlled_attachment_reference() {
+        let crawler_config = CrawlerConfig::bounded(false, 2, 20, 40, 1_000, 4_194_304).unwrap();
+        let jwc = get_jwc(crawler_config).unwrap();
+        let fixture = include_str!("../../tests/fixtures/jwc_detail.html");
+
+        let content = jwc
+            .parse_content_html(
+                "https://jwc.seu.edu.cn/2026/0728/c21676a600001/page.htm",
+                "div.Article_Content",
+                fixture,
+            )
+            .unwrap();
+
+        assert!(content.text.contains("考试安排正文"));
+        assert!(content.text.contains("日期"));
+        assert_eq!(
+            content.attachment_urls,
+            vec!["https://jwc.seu.edu.cn/_upload/file/demo.pdf"]
+        );
+    }
+
+    #[test]
+    fn detail_fixture_reports_selector_change_without_panicking() {
+        let crawler_config = CrawlerConfig::bounded(false, 2, 20, 40, 1_000, 4_194_304).unwrap();
+        let jwc = get_jwc(crawler_config).unwrap();
+        let fixture = include_str!("../../tests/fixtures/jwc_detail.html");
+
+        let error = jwc
+            .parse_content_html(
+                "https://jwc.seu.edu.cn/2026/0728/c21676a600001/page.htm",
+                "div.changed-selector",
+                fixture,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "PARSE_SCHEMA_CHANGED");
     }
 }

@@ -3,7 +3,11 @@ use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use url::Url;
 
-pub(crate) fn get_pretty_text(element: ElementRef, base_url: &Url, keep_complex_tables: bool) -> String {
+pub(crate) fn get_pretty_text(
+    element: ElementRef,
+    base_url: &Url,
+    keep_complex_tables: bool,
+) -> Result<String, &'static str> {
     let html_fragment = element.html();
     let pre_cleaned_html = html_fragment.replace("&nbsp;", " ").replace("&#160;", " ");
 
@@ -17,8 +21,10 @@ pub(crate) fn get_pretty_text(element: ElementRef, base_url: &Url, keep_complex_
     let converter = HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style", "colgroup", "col"])
         .build();
-    let raw_markdown = converter.convert(&input_html).unwrap_or_default();
-    
+    let raw_markdown = converter
+        .convert(&input_html)
+        .map_err(|_| "MARKDOWN_CONVERSION_FAILED")?;
+
     let cleaned = fix_markdown_links(&raw_markdown, base_url).replace("||", "|\n|");
     let re_multi_spaces = Regex::new(r"[ \t]{2,}").unwrap();
 
@@ -30,7 +36,7 @@ pub(crate) fn get_pretty_text(element: ElementRef, base_url: &Url, keep_complex_
         })
         .filter(|line| !line.is_empty())
         .collect();
-    
+
     let mut result = String::new();
     for i in 0..lines.len() {
         result.push_str(&lines[i]);
@@ -42,7 +48,7 @@ pub(crate) fn get_pretty_text(element: ElementRef, base_url: &Url, keep_complex_
             }
         }
     }
-    
+
     let mut final_markdown = clean_markdown(&fix_markdown_table_separator(&result));
 
     if let Some(replacements) = table_replacements {
@@ -51,16 +57,13 @@ pub(crate) fn get_pretty_text(element: ElementRef, base_url: &Url, keep_complex_
         }
     }
 
-    final_markdown
+    Ok(final_markdown)
 }
 
-fn replace_complex_tables_with_placeholders(
-    html: &str,
-) -> (String, Vec<(String, String)>) {
+fn replace_complex_tables_with_placeholders(html: &str) -> (String, Vec<(String, String)>) {
     let document = Html::parse_document(html);
     let mut replacements: Vec<(String, String)> = Vec::new();
     let mut placeholder_index = 0;
-
 
     let table_sel = Selector::parse("table").unwrap();
     let td_th_sel = Selector::parse("td, th").unwrap();
@@ -70,8 +73,7 @@ fn replace_complex_tables_with_placeholders(
     for table in document.select(&table_sel) {
         let mut has_complex_cell = false;
         for cell in table.select(&td_th_sel) {
-            if cell.value().attr("rowspan").is_some() || cell.value().attr("colspan").is_some()
-            {
+            if cell.value().attr("rowspan").is_some() || cell.value().attr("colspan").is_some() {
                 has_complex_cell = true;
                 break;
             }
@@ -119,21 +121,20 @@ fn clean_html_table(html: &str) -> String {
 
 fn fix_markdown_links(md: &str, base_url: &Url) -> String {
     let re = Regex::new(r"(?P<p>!?\[.*?])\((?P<u>[^ )]+)(?:\s+.*?)?\)").unwrap();
-    re
-        .replace_all(md, |caps: &regex::Captures| {
-            let prefix = &caps["p"];
-            let link = &caps["u"];
-            if let Ok(absolute_url) = base_url.join(link) {
-                let url_str = absolute_url.to_string();
-                if url_str.contains("icon_") {
-                    return "".to_string();
-                }
-                format!("{}({})", prefix, url_str)
-            } else {
-                format!("{}({})", prefix, link)
+    re.replace_all(md, |caps: &regex::Captures| {
+        let prefix = &caps["p"];
+        let link = &caps["u"];
+        if let Ok(absolute_url) = base_url.join(link) {
+            let url_str = absolute_url.to_string();
+            if url_str.contains("icon_") {
+                return "".to_string();
             }
-        })
-        .to_string()
+            format!("{}({})", prefix, url_str)
+        } else {
+            format!("{}({})", prefix, link)
+        }
+    })
+    .to_string()
 }
 
 fn fix_markdown_table_separator(md: &str) -> String {
@@ -143,21 +144,28 @@ fn fix_markdown_table_separator(md: &str) -> String {
     }
 
     let header_indices: Vec<usize> = lines
-    .windows(2)
-    .enumerate()
-    .filter(|(_, pair)| ! pair[0].trim().is_empty() && pair[1].trim().starts_with('|') && ! pair[1].trim().starts_with("|--"))
-    .map(|(i, _)| i)
-    .collect();
-    
-    for header_idx in header_indices.into_iter().rev() {  // 逆序处理，避免索引偏移
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| {
+            !pair[0].trim().is_empty()
+                && pair[1].trim().starts_with('|')
+                && !pair[1].trim().starts_with("|--")
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    for header_idx in header_indices.into_iter().rev() {
+        // 逆序处理，避免索引偏移
         let column_count = lines[header_idx].matches('|').count().saturating_sub(1);
-        if column_count > 0 && header_idx + 1 < lines.len() 
-            && !lines[header_idx + 1].contains("---") {
+        if column_count > 0
+            && header_idx + 1 < lines.len()
+            && !lines[header_idx + 1].contains("---")
+        {
             let separator = format!("| {} |", vec!["---"; column_count].join(" | "));
             lines.insert(header_idx + 1, separator);
         }
     }
-    
+
     lines.join("\n")
 }
 
@@ -172,7 +180,24 @@ fn clean_markdown(markdown: &str) -> String {
 
 fn is_punctuation(c: char) -> bool {
     c.is_ascii_punctuation()
-        || matches!(c, '，' | '。' | '！' | '？' | '；' | '：' | '"' | '\'' | '（' | '）' | '【' | '】' | '《' | '》' | '…' | '、')
+        || matches!(
+            c,
+            '，' | '。'
+                | '！'
+                | '？'
+                | '；'
+                | '：'
+                | '"'
+                | '\''
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '…'
+                | '、'
+        )
 }
 
 fn remove_empty_bold_pairs(md: &str) -> String {

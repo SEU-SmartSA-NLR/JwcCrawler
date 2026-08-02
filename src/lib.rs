@@ -1,17 +1,19 @@
-use crate::crawl::{Crawler, CrawlerConfig};
 use crate::crawl::cs::get_cs;
 use crate::crawl::jwc::get_jwc;
 use crate::crawl::xsxy::get_xsxy;
+use crate::crawl::{Crawler, CrawlerConfig};
+use crate::hardening::atomic_write_json;
 use crate::models::DataSource;
 use chrono::NaiveDate;
 use clap::Parser;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 
 mod crawl;
-pub mod models;
+pub mod hardening;
 mod markdown;
+pub mod models;
+pub mod worker;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -39,20 +41,34 @@ pub struct Args {
     keep_complex_tables: bool,
     #[arg(long, help = "Fetch a single URL instead of crawling data source")]
     url: Option<String>,
+    #[arg(long, default_value_t = 2)]
+    max_pages_per_category: usize,
+    #[arg(long, default_value_t = 20)]
+    max_detail_fetches: usize,
+    #[arg(long, default_value_t = 40)]
+    max_total_http_requests: usize,
+    #[arg(long, default_value_t = 1000)]
+    min_interval_ms: u64,
+    #[arg(long, default_value_t = 4_194_304)]
+    max_response_bytes: usize,
 }
 
 type CrawlerFactory = fn(CrawlerConfig) -> Result<Crawler, Box<dyn Error>>;
 
 pub fn run(args: Args) -> Result<(), Box<dyn Error>> {
-    let crawler_config = CrawlerConfig {
-        keep_complex_tables: args.keep_complex_tables
-    };
-    
+    let crawler_config = CrawlerConfig::bounded(
+        args.keep_complex_tables,
+        args.max_pages_per_category,
+        args.max_detail_fetches,
+        args.max_total_http_requests,
+        args.min_interval_ms,
+        args.max_response_bytes,
+    )?;
+
     if let Some(url) = args.url {
         let crawler = get_jwc(crawler_config)?;
         let content = crawler.fetch_url(&url, "div.Article_Content")?;
-        let s = serde_json::to_string_pretty(&content)?;
-        fs::write(args.out, s)?;
+        atomic_write_json(std::path::Path::new(&args.out), &content)?;
         return Ok(());
     }
 
@@ -65,11 +81,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn Error>> {
         format!(
             "Unsupported data source: {}. Currently support {}.",
             args.data_source,
-            crawler_map
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            crawler_map.keys().cloned().collect::<Vec<_>>().join(", ")
         )
     })?;
     let crawler = factory(crawler_config)?;
@@ -80,7 +92,6 @@ pub fn run(args: Args) -> Result<(), Box<dyn Error>> {
 
     let items = crawler.fetch(date, args.with_contents_only)?;
 
-    let s = serde_json::to_string_pretty(&items)?;
-    fs::write(args.out, s)?;
+    atomic_write_json(std::path::Path::new(&args.out), &items)?;
     Ok(())
 }
