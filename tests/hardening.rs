@@ -8,14 +8,41 @@ use url::Url;
 
 #[test]
 fn request_budgets_are_hard_limits() {
-    let mut budget = CrawlBudget::new(2, 1, 3).unwrap();
+    let mut budget = CrawlBudget::new(2, 1, 3, 1).unwrap();
 
     budget.record_list_page("jwxx").unwrap();
     budget.record_list_page("jwxx").unwrap();
     assert!(budget.record_list_page("jwxx").is_err());
-    budget.record_detail().unwrap();
-    assert!(budget.record_detail().is_err());
+    budget.record_detail("jwxx").unwrap();
+    assert!(budget.record_detail("jwxx").is_err());
     assert_eq!(budget.total_http_requests(), 3);
+}
+
+#[test]
+fn detail_budget_is_distributed_across_categories() {
+    // 20 个详情预算分给 7 个分类：每分类配额向上取整为 3。
+    let mut budget = CrawlBudget::new(2, 20, 40, 7).unwrap();
+
+    for category in ["zxdt", "jwxx", "xjgl", "jxyj"] {
+        for _ in 0..3 {
+            budget.record_detail(category).unwrap();
+        }
+        assert!(budget.record_detail(category).is_err());
+    }
+    // 配额只限制单分类，全局 20 上限仍然生效
+    assert_eq!(budget.total_http_requests(), 12);
+}
+
+#[test]
+fn detail_quota_does_not_consume_other_categories() {
+    // 小窗口下预算只有 4 篇详情：每分类 1 篇，四个分类各得 1 篇。
+    let mut budget = CrawlBudget::new(2, 4, 11, 7).unwrap();
+
+    for category in ["zxdt", "jwxx", "xjgl", "jxyj"] {
+        budget.record_detail(category).unwrap();
+    }
+    assert!(budget.record_detail("sjjx").is_err());
+    assert_eq!(budget.total_http_requests(), 4);
 }
 
 #[test]

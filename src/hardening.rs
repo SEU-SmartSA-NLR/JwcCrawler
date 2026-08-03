@@ -28,6 +28,8 @@ pub struct CrawlBudget {
     max_detail_fetches: usize,
     max_total_http_requests: usize,
     pages_by_category: HashMap<String, usize>,
+    details_by_category: HashMap<String, usize>,
+    detail_quota: usize,
     detail_fetches: usize,
     total_http_requests: usize,
 }
@@ -37,10 +39,12 @@ impl CrawlBudget {
         max_pages_per_category: usize,
         max_detail_fetches: usize,
         max_total_http_requests: usize,
+        category_count: usize,
     ) -> Result<Self, HardeningError> {
         if max_pages_per_category == 0
             || max_detail_fetches == 0
             || max_total_http_requests < max_detail_fetches
+            || category_count == 0
         {
             return Err(HardeningError("INVALID_CRAWL_BUDGET"));
         }
@@ -49,6 +53,9 @@ impl CrawlBudget {
             max_detail_fetches,
             max_total_http_requests,
             pages_by_category: HashMap::new(),
+            details_by_category: HashMap::new(),
+            // 详情预算按分类均分（向上取整），避免第一个分类吃光全部预算
+            detail_quota: max_detail_fetches.div_ceil(category_count),
             detail_fetches: 0,
             total_http_requests: 0,
         })
@@ -65,12 +72,22 @@ impl CrawlBudget {
         Ok(())
     }
 
-    pub fn record_detail(&mut self) -> Result<(), HardeningError> {
+    pub fn record_detail(&mut self, category: &str) -> Result<(), HardeningError> {
         if self.detail_fetches >= self.max_detail_fetches {
+            return Err(HardeningError("DETAIL_BUDGET_EXCEEDED"));
+        }
+        let used = self.details_by_category.get(category).copied().unwrap_or(0);
+        let quota = if category == "__single__" {
+            self.max_detail_fetches
+        } else {
+            self.detail_quota
+        };
+        if used >= quota {
             return Err(HardeningError("DETAIL_BUDGET_EXCEEDED"));
         }
         self.record_http_request()?;
         self.detail_fetches += 1;
+        self.details_by_category.insert(category.to_string(), used + 1);
         Ok(())
     }
 

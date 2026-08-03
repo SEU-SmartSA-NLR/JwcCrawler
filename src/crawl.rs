@@ -112,6 +112,7 @@ impl CrawlerConfig {
             max_pages_per_category,
             max_detail_fetches,
             max_total_http_requests,
+            1,
         )?;
         if max_response_bytes == 0 || max_response_bytes > 64 * 1024 * 1024 {
             return Err("INVALID_RESPONSE_BUDGET".into());
@@ -155,6 +156,7 @@ impl DataSource for Crawler {
             self.crawler_config.max_pages_per_category,
             self.crawler_config.max_detail_fetches,
             self.crawler_config.max_total_http_requests,
+            self.site_config.categories.len(),
         )?;
         'categories: for category in &self.site_config.categories {
             let item_start = all_news.len();
@@ -283,8 +285,8 @@ impl Crawler {
     }
 
     pub fn fetch_url(&self, url: &str, content_selector: &str) -> Result<Content, Box<dyn Error>> {
-        let mut budget = CrawlBudget::new(1, 1, 1)?;
-        budget.record_detail()?;
+        let mut budget = CrawlBudget::new(1, 1, 1, 1)?;
+        budget.record_detail("__single__")?;
         self.fetch_content(url, content_selector, &mut budget)
     }
 
@@ -312,8 +314,7 @@ impl Crawler {
         let base_url = Url::parse(&self.site_config.base_url)?;
         let mut row_count = 0;
         let mut parsed_row_count = 0;
-        let mut detail_budget_exhausted = false;
-        for row in document.select(&row_selector) {
+        'rows: for row in document.select(&row_selector) {
             row_count += 1;
             let Some(link) = row.select(&link_selector).next() else {
                 continue;
@@ -352,8 +353,8 @@ impl Crawler {
                 .attachment_extensions
                 .iter()
                 .any(|extension| detail_url.to_lowercase().ends_with(extension));
-            let content = if is_page && !detail_budget_exhausted {
-                match budget.record_detail() {
+            let content = if is_page {
+                match budget.record_detail(&category.label) {
                     Ok(()) => match self.fetch_content(
                         &detail_url,
                         &self.site_config.selectors.content_body,
@@ -373,10 +374,9 @@ impl Crawler {
                         }
                     },
                     Err(error) => {
-                        // 详情预算耗尽：只记一次，不再尝试本页剩余详情
+                        // 本分类详情配额耗尽：只记一次，跳到下一分类
                         warning_codes.push(error.to_string());
-                        detail_budget_exhausted = true;
-                        None
+                        break 'rows;
                     }
                 }
             } else {
