@@ -312,6 +312,7 @@ impl Crawler {
         let base_url = Url::parse(&self.site_config.base_url)?;
         let mut row_count = 0;
         let mut parsed_row_count = 0;
+        let mut detail_budget_exhausted = false;
         for row in document.select(&row_selector) {
             row_count += 1;
             let Some(link) = row.select(&link_selector).next() else {
@@ -336,17 +337,22 @@ impl Crawler {
                 continue;
             }
             let detail_url = match base_url.join(href) {
-                Ok(value) => value.to_string(),
+                Ok(value) => value,
                 Err(_) => {
                     warning_codes.push("PARSE_SCHEMA_CHANGED".to_string());
                     continue;
                 }
             };
+            // 站外链接（公众号文章、其他站点）不是本站 schema 变化，直接跳过
+            if detail_url.host_str() != base_url.host_str() {
+                continue;
+            }
+            let detail_url = detail_url.to_string();
             let is_page = !self
                 .attachment_extensions
                 .iter()
                 .any(|extension| detail_url.to_lowercase().ends_with(extension));
-            let content = if is_page {
+            let content = if is_page && !detail_budget_exhausted {
                 match budget.record_detail() {
                     Ok(()) => match self.fetch_content(
                         &detail_url,
@@ -367,7 +373,9 @@ impl Crawler {
                         }
                     },
                     Err(error) => {
+                        // 详情预算耗尽：只记一次，不再尝试本页剩余详情
                         warning_codes.push(error.to_string());
+                        detail_budget_exhausted = true;
                         None
                     }
                 }
@@ -716,5 +724,25 @@ mod tests {
         let error = crawler.fetch(None, true).unwrap_err();
 
         assert_eq!(error.to_string(), "CRAWL_DEADLINE_EXCEEDED");
+    }
+
+    #[test]
+    fn external_list_links_are_detected_by_host_mismatch() {
+        // 列表页会混入公众号与兄弟站点链接，这些链接必须按站外跳过，
+        // 而不是当作本站详情页触发 TARGET_NOT_ALLOWLISTED。
+        let base_url = Url::parse("https://jwc.seu.edu.cn").unwrap();
+        for (href, expected_internal) in [
+            ("/2026/0729/c21678a578468/page.htm", true),
+            ("/_upload/file/demo.pdf", true),
+            ("https://mp.weixin.qq.com/s/8v8FjMNAEsGxZRkP5EUWng", false),
+            ("https://power.seu.edu.cn/2026/0430/c9503a566327/page.htm", false),
+        ] {
+            let joined = base_url.join(href).unwrap();
+            assert_eq!(
+                joined.host_str() == base_url.host_str(),
+                expected_internal,
+                "href={href}"
+            );
+        }
     }
 }
