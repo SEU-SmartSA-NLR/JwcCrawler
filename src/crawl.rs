@@ -185,6 +185,10 @@ impl DataSource for Crawler {
                     Ok(status) => status,
                     Err(error) => {
                         let code = error.to_string();
+                        if code == "CRAWL_DEADLINE_EXCEEDED" && !all_news.is_empty() {
+                            warning_codes.push("CRAWL_DEADLINE_EXCEEDED".to_string());
+                            break 'categories;
+                        }
                         if matches!(code.as_str(), "CRAWL_DEADLINE_EXCEEDED" | "CRAWL_CANCELLED") {
                             return Err(error);
                         }
@@ -689,5 +693,28 @@ impl Crawler {
             .iter()
             .map(|value| format!("{value:02x}"))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crawl::jwc::get_jwc;
+    use chrono::Utc;
+
+    #[test]
+    fn fetch_rejects_elapsed_deadline_before_any_http_request() {
+        let crawler_config = CrawlerConfig::bounded(true, 2, 20, 40, 1_000, 4_194_304)
+            .unwrap()
+            .with_runtime_limits(
+                Utc::now() - chrono::Duration::seconds(1),
+                PathBuf::from("/nonexistent-cancel"),
+                PathBuf::from("/nonexistent-rate"),
+            );
+        let crawler = get_jwc(crawler_config).unwrap();
+
+        let error = crawler.fetch(None, true).unwrap_err();
+
+        assert_eq!(error.to_string(), "CRAWL_DEADLINE_EXCEEDED");
     }
 }
