@@ -87,7 +87,8 @@ impl CrawlBudget {
         }
         self.record_http_request()?;
         self.detail_fetches += 1;
-        self.details_by_category.insert(category.to_string(), used + 1);
+        self.details_by_category
+            .insert(category.to_string(), used + 1);
         Ok(())
     }
 

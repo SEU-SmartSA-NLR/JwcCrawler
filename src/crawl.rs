@@ -97,6 +97,9 @@ pub struct CrawlerConfig {
     pub deadline_at: Option<DateTime<Utc>>,
     pub cancel_path: Option<PathBuf>,
     pub rate_state_path: Option<PathBuf>,
+    pub start_page: usize,
+    pub category_label: Option<String>,
+    pub date_before: Option<NaiveDate>,
 }
 
 impl CrawlerConfig {
@@ -127,6 +130,9 @@ impl CrawlerConfig {
             deadline_at: None,
             cancel_path: None,
             rate_state_path: None,
+            start_page: 1,
+            category_label: None,
+            date_before: None,
         })
     }
 
@@ -141,6 +147,21 @@ impl CrawlerConfig {
         self.rate_state_path = Some(rate_state_path);
         self
     }
+
+    pub fn with_scan_window(
+        mut self,
+        start_page: usize,
+        category_label: Option<String>,
+        date_before: Option<NaiveDate>,
+    ) -> Result<Self, Box<dyn Error>> {
+        if start_page == 0 {
+            return Err("INVALID_PAGE_CURSOR".into());
+        }
+        self.start_page = start_page;
+        self.category_label = category_label;
+        self.date_before = date_before;
+        Ok(self)
+    }
 }
 
 impl DataSource for Crawler {
@@ -152,19 +173,37 @@ impl DataSource for Crawler {
         let mut all_news = Vec::new();
         let mut warning_codes = Vec::new();
         let mut category_reports = Vec::new();
+        let categories = self
+            .site_config
+            .categories
+            .iter()
+            .filter(|category| {
+                self.crawler_config
+                    .category_label
+                    .as_ref()
+                    .is_none_or(|label| label == &category.label)
+            })
+            .collect::<Vec<_>>();
+        if categories.is_empty() {
+            return Err("JOB_CATEGORY_INVALID".into());
+        }
         let mut budget = CrawlBudget::new(
             self.crawler_config.max_pages_per_category,
             self.crawler_config.max_detail_fetches,
             self.crawler_config.max_total_http_requests,
-            self.site_config.categories.len(),
+            categories.len(),
         )?;
-        'categories: for category in &self.site_config.categories {
+        'categories: for category in categories {
             let item_start = all_news.len();
             let warning_start = warning_codes.len();
             let mut category_failed = false;
-            let mut page = 1;
+            let mut page = self.crawler_config.start_page;
+            let last_page = self
+                .crawler_config
+                .start_page
+                .saturating_add(self.crawler_config.max_pages_per_category);
             loop {
-                if page > self.crawler_config.max_pages_per_category {
+                if page >= last_page {
                     break;
                 }
                 if let Err(error) = budget.record_list_page(&category.label) {
@@ -181,6 +220,7 @@ impl DataSource for Crawler {
                     category,
                     page,
                     date_after,
+                    self.crawler_config.date_before,
                     with_contents_only,
                     &mut budget,
                 ) {
@@ -200,11 +240,12 @@ impl DataSource for Crawler {
                     }
                 };
                 warning_codes.extend(status.warning_codes);
-                if status.news_items.is_empty() {
-                    break;
-                }
                 all_news.extend(status.news_items);
                 if !status.has_next_page {
+                    break;
+                }
+                if page.saturating_add(1) >= last_page {
+                    warning_codes.push("LIST_PAGE_BUDGET_EXCEEDED".to_string());
                     break;
                 }
                 page += 1;
@@ -295,6 +336,7 @@ impl Crawler {
         category: &Category,
         page: usize,
         date_after: Option<NaiveDate>,
+        date_before: Option<NaiveDate>,
         with_contents_only: bool,
         budget: &mut CrawlBudget,
     ) -> Result<FetchStatus, Box<dyn Error>> {
@@ -314,6 +356,7 @@ impl Crawler {
         let base_url = Url::parse(&self.site_config.base_url)?;
         let mut row_count = 0;
         let mut parsed_row_count = 0;
+        let mut reached_date_after = false;
         'rows: for row in document.select(&row_selector) {
             row_count += 1;
             let Some(link) = row.select(&link_selector).next() else {
@@ -335,6 +378,10 @@ impl Crawler {
             };
             parsed_row_count += 1;
             if date_after.is_some_and(|minimum| news_date < minimum) {
+                reached_date_after = true;
+                continue;
+            }
+            if date_before.is_some_and(|maximum| news_date > maximum) {
                 continue;
             }
             let detail_url = match base_url.join(href) {
@@ -408,7 +455,7 @@ impl Crawler {
         warning_codes.dedup();
         Ok(FetchStatus {
             news_items: items,
-            has_next_page: current < total,
+            has_next_page: current < total && !reached_date_after,
             warning_codes,
         })
     }
@@ -735,7 +782,10 @@ mod tests {
             ("/2026/0729/c21678a578468/page.htm", true),
             ("/_upload/file/demo.pdf", true),
             ("https://mp.weixin.qq.com/s/8v8FjMNAEsGxZRkP5EUWng", false),
-            ("https://power.seu.edu.cn/2026/0430/c9503a566327/page.htm", false),
+            (
+                "https://power.seu.edu.cn/2026/0430/c9503a566327/page.htm",
+                false,
+            ),
         ] {
             let joined = base_url.join(href).unwrap();
             assert_eq!(

@@ -28,6 +28,26 @@ fn worker_job_accepts_only_versioned_bounded_fields() {
 }
 
 #[test]
+fn worker_job_accepts_v2_scoped_page_cursor() {
+    let payload = r#"{
+        "schema_version":2,"job_id":"backfill-jwxx-3","source_id":"seu-jwc",
+        "created_at":"2026-07-28T12:00:00Z","deadline_at":"2026-07-28T12:01:00Z",
+        "date_after":"2024-07-28","date_before":"2026-07-28",
+        "category_label":"教务信息","start_page":3,"max_pages_per_category":2,
+        "max_detail_fetches":20,"max_total_http_requests":40,"with_contents_only":true
+    }"#;
+    let job: WorkerJob = serde_json::from_str(payload).unwrap();
+
+    assert_eq!(job.schema_version, 2);
+    assert_eq!(job.category_label.as_deref(), Some("教务信息"));
+    assert_eq!(job.start_page, Some(3));
+    assert!(
+        job.validate(job.created_at + chrono::Duration::seconds(1))
+            .is_ok()
+    );
+}
+
+#[test]
 fn worker_job_rejects_unknown_fields_expiry_and_unbounded_values() {
     let unknown = r#"{
         "schema_version":1,"job_id":"x","source_id":"seu-jwc",

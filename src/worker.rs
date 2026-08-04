@@ -20,6 +20,9 @@ pub struct WorkerJob {
     pub created_at: DateTime<Utc>,
     pub deadline_at: DateTime<Utc>,
     pub date_after: Option<NaiveDate>,
+    pub date_before: Option<NaiveDate>,
+    pub category_label: Option<String>,
+    pub start_page: Option<usize>,
     pub max_pages_per_category: usize,
     pub max_detail_fetches: usize,
     pub max_total_http_requests: usize,
@@ -28,7 +31,7 @@ pub struct WorkerJob {
 
 impl WorkerJob {
     pub fn validate(&self, now: DateTime<Utc>) -> Result<(), &'static str> {
-        if self.schema_version != 1 || self.source_id != "seu-jwc" {
+        if !(self.schema_version == 1 || self.schema_version == 2) || self.source_id != "seu-jwc" {
             return Err("JOB_SCHEMA_INVALID");
         }
         if self.job_id.is_empty()
@@ -39,18 +42,31 @@ impl WorkerJob {
         {
             return Err("JOB_ID_INVALID");
         }
+        if self.start_page.is_some_and(|page| page == 0)
+            || self
+                .date_after
+                .zip(self.date_before)
+                .is_some_and(|(start, end)| start > end)
+        {
+            return Err("JOB_CURSOR_INVALID");
+        }
+        if self.schema_version == 2 && self.category_label.as_deref().is_none_or(str::is_empty) {
+            return Err("JOB_CATEGORY_INVALID");
+        }
         if self.created_at >= self.deadline_at
             || now >= self.deadline_at
             || self.deadline_at - self.created_at > chrono::Duration::seconds(120)
         {
             return Err("CRAWL_DEADLINE_EXCEEDED");
         }
+        let max_detail_fetches = if self.schema_version == 2 { 50 } else { 20 };
+        let max_total_http_requests = if self.schema_version == 2 { 60 } else { 40 };
         if self.max_pages_per_category == 0
             || self.max_pages_per_category > 2
             || self.max_detail_fetches == 0
-            || self.max_detail_fetches > 20
+            || self.max_detail_fetches > max_detail_fetches
             || self.max_total_http_requests < self.max_detail_fetches
-            || self.max_total_http_requests > 40
+            || self.max_total_http_requests > max_total_http_requests
             || !self.with_contents_only
         {
             return Err("JOB_BUDGET_INVALID");
@@ -214,6 +230,8 @@ pub fn process_ready_job(root: &Path, ready_path: &Path) -> Result<(), Box<dyn E
             "JOB_SCHEMA_INVALID" => "JOB_SCHEMA_INVALID",
             "JOB_ID_INVALID" => "JOB_ID_INVALID",
             "JOB_BUDGET_INVALID" => "JOB_BUDGET_INVALID",
+            "JOB_CATEGORY_INVALID" => "JOB_CATEGORY_INVALID",
+            "JOB_CURSOR_INVALID" => "JOB_CURSOR_INVALID",
             _ => "CRAWL_FAILED",
         };
         atomic_write_json(
@@ -276,7 +294,12 @@ pub fn run_job_file(
         1_000,
         4_194_304,
     )?
-    .with_runtime_limits(job.deadline_at, cancel_path.clone(), rate_state_path);
+    .with_runtime_limits(job.deadline_at, cancel_path.clone(), rate_state_path)
+    .with_scan_window(
+        job.start_page.unwrap_or(1),
+        job.category_label.clone(),
+        job.date_before,
+    )?;
     let crawler = get_jwc(config)?;
     let started_at = Utc::now();
     let items = crawler.fetch(job.date_after, job.with_contents_only)?;
@@ -322,7 +345,7 @@ pub fn run_job_file(
     let completed_at = Utc::now();
     ensure_job_active(&job, &cancel_path)?;
     let manifest = WorkerResultManifest {
-        schema_version: 1,
+        schema_version: job.schema_version,
         job_id: job.job_id,
         source_id: job.source_id,
         status,
